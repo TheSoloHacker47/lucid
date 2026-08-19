@@ -3,11 +3,12 @@
  * doc's tuning table and are meant to be adjusted by feel — this is the file to
  * open when the game doesn't feel like Hollow Knight yet.
  */
-import { G, TS, tap, clamp, rr, rnd, hits } from './state.js';
-import { moveEntity, onHazard, hazardAt, ROOM_W, ROOM_H } from './world.js';
-import { ROOM } from './data.js';
+import { G, TS, tap, clamp, rr, DREAM, NIGHT } from './state.js';
+import { moveEntity, onHazard, hazardAt, ROOM_W, ROOM_H, map, COLS, ROWS } from './world.js';
+import { RED, ORANGE, SHARD_NAME } from './data.js';
 import { doShift } from './shift.js';
 import { spawnParts } from './entities.js';
+import { say } from './dialog.js';
 import { sfx } from './audio.js';
 
 // --- movement tuning (§5.1) --------------------------------------------------
@@ -19,6 +20,8 @@ const JUMP = 4.6;
 const MAX_FALL = 6;
 const COYOTE = 6;         // frames of grace after walking off a ledge
 const BUFFER = 6;         // frames a jump press stays queued
+const SLIDE = 0.6;        // wall-cling descent speed (Orange Shard)
+const WALL_KICK = 2.6;    // horizontal kick off a wall-jump
 
 // --- combat tuning (§5.2) ----------------------------------------------------
 const ATK_FRAMES = 3;     // 3-frame lunge slash
@@ -33,6 +36,7 @@ export const player = {
   vx: 0, vy: 0,
   face: 1,
   onGround: 0, onWall: 0,
+  cling: 0,          // -1 clinging to a wall on the left, 1 on the right
   coyote: 0, buffer: 0,
   atk: 0, atkCd: 0, atkDown: 0, atkHit: 0,
   iframes: 0,
@@ -41,27 +45,39 @@ export const player = {
   land: 0,           // landing-squash frames
   idle: 0,           // frames without input (drives the ear flick)
   trail: [],         // recent head positions -> the mane/tail ribbons (§8.3)
-  spawnX: 0, spawnY: 0,
 };
 
-/** Find 'P' in the room and put Prisma there. */
-export function spawnPlayer() {
-  for (let r = 0; r < ROOM.length; r++) {
-    const c = ROOM[r].indexOf('P');
-    if (c >= 0) { player.spawnX = c * TS + 2; player.spawnY = r * TS + 4; }
-  }
-  respawn();
+/** Shards are a bitfield: index doubles as the ability and the rainbow colour. */
+export const hasShard = (n) => G.shards >> n & 1;
+
+export function grantShard(n) {
+  if (hasShard(n)) return;
+  G.shards |= 1 << n;
+  G.seg = 7;
+  G.hitstop = 12;
+  G.shake = 5;
+  spawnParts(player.x + 6, player.y + 6, 24, n);
+  say(n === RED ? 5 : 6, 190);
+  sfx.shard();
 }
 
-export function respawn() {
-  player.x = player.spawnX;
-  player.y = player.spawnY;
-  player.vx = player.vy = 0;
-  player.iframes = 30;
-  player.blink = 30;
-  player.trail.length = 0;
-  G.seg = 7;
-  G.dead = 0;
+/** Put Prisma at the room's 'P' marker, or at the given edge on a transition. */
+export function placePlayer(edge) {
+  const p = player;
+  p.vx = p.vy = 0;
+  p.trail.length = 0;
+  if (edge === 'l') { p.x = 2; return; }
+  if (edge === 'r') { p.x = ROOM_W - p.w - 2; return; }
+  for (let r = 0; r < ROWS; r++) {
+    const c = map[r].indexOf('P');
+    if (c >= 0) { p.x = c * TS + 2; p.y = r * TS + 4; return; }
+  }
+  p.x = 24; p.y = 24;   // rooms without a 'P' are only ever entered from an edge
+}
+
+/** Restore rainbow segments, capped at seven. */
+export function heal(n) {
+  G.seg = Math.min(7, G.seg + n);
 }
 
 /** Take a hit: shatter the leftmost rainbow segment (§5.3). */
@@ -90,7 +106,7 @@ export function attackBox() {
     : { x: player.face > 0 ? cx : cx - ATK_REACH, y: cy - 9, w: ATK_REACH, h: 18 };
 }
 
-/** Called by entities.js when the strike connects, so pogo/recoil are shared. */
+/** Called when the strike connects, so pogo and recoil are shared by everything. */
 export function onStrikeLanded(targetX) {
   player.atkHit = 1;
   G.hitstop = 2;                    // 2-frame hitstop on every landed strike (§5.5)
@@ -108,7 +124,7 @@ export function onStrikeLanded(targetX) {
 export function updatePlayer() {
   const p = player;
 
-  if (G.dead > 0) { G.dead--; if (!G.dead) respawn(); return; }
+  if (G.dead > 0) return;   // main.js handles the dissolve and the respawn
 
   // --- horizontal ---
   const left = G.key.l, right = G.key.r;
@@ -117,6 +133,17 @@ export function updatePlayer() {
   else                     { p.vx *= p.onGround ? 0.72 : 0.94; if (Math.abs(p.vx) < 0.05) p.vx = 0; }
 
   p.idle = (left || right || !p.onGround) ? 0 : p.idle + 1;
+
+  // --- wall cling (Orange Shard, §5.1) ---
+  // Holding into a wall while falling slows the descent to a slide, and the
+  // jump button then kicks away from it at roughly 45 degrees.
+  const pressingInto = (p.cling < 0 && left) || (p.cling > 0 && right);
+  if (hasShard(ORANGE) && !p.onGround && p.onWall && p.vy > 0 &&
+      ((p.onWall < 0 && left) || (p.onWall > 0 && right))) {
+    p.cling = p.onWall;
+  } else if (p.onGround || !p.onWall || !pressingInto) {
+    p.cling = 0;
+  }
 
   // --- jump: coyote time + input buffer, both mandatory for feel (§5.1) ---
   if (tap('j')) p.buffer = BUFFER;
@@ -128,10 +155,18 @@ export function updatePlayer() {
     p.buffer = p.coyote = 0;
     p.onGround = 0;
     sfx.jump();
+  } else if (p.buffer > 0 && p.cling) {
+    p.vy = -JUMP * 0.95;
+    p.vx = -p.cling * WALL_KICK;
+    p.face = -p.cling;
+    p.buffer = 0;
+    p.cling = 0;
+    sfx.jump();
   }
 
   // Holding jump while rising uses weaker gravity -> variable jump height.
   p.vy += (G.key.j && p.vy < 0) ? GRAV_HELD : GRAV;
+  if (p.cling && p.vy > SLIDE) p.vy = SLIDE;
   if (p.vy > MAX_FALL) p.vy = MAX_FALL;
 
   // --- attack ---
@@ -146,8 +181,9 @@ export function updatePlayer() {
   // A swing that touched nothing gets a quieter whiff on its last frame.
   if (p.atk === 1 && !p.atkHit) sfx.whiff();
 
-  // --- dream shift ---
-  if (tap('s')) doShift(p);
+  // --- dream shift (locked until the Red Shard, §S04) ---
+  if (tap('s') && hasShard(RED)) doShift(p);
+  if (G.forceShift) { G.forceShift = 0; G.shiftCd = 0; doShift(p); }
 
   // --- integrate + collide ---
   const wasAir = !p.onGround;
@@ -174,13 +210,12 @@ export function updatePlayer() {
   // Spikes bite only in the nightmare (§8.5).
   if (onHazard(p, G.world)) hurt(p.x + p.w / 2 + (p.face > 0 ? -20 : 20));
 
-  // Falling out of the room costs a segment and returns you to the spawn.
+  // Falling out of the room costs a segment and returns you to solid ground.
   if (p.y > ROOM_H + 32) {
     p.iframes = 0;
     hurt(p.x);
-    if (G.seg > 0) { p.x = p.spawnX; p.y = p.spawnY; p.vx = p.vy = 0; p.trail.length = 0; }
+    if (G.seg > 0) { placePlayer(); p.iframes = 40; p.blink = 40; }
   }
-  p.x = clamp(p.x, 0, ROOM_W - p.w);
 
   // The trailing-ribbon mane follows the head's recent history (§8.3).
   p.trail.unshift({ x: p.x + p.w / 2 - p.face * 3, y: p.y + 3 });

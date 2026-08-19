@@ -1,17 +1,20 @@
 /**
- * LUCID — boot, input, and the fixed-timestep game loop.
+ * LUCID — boot, input, room transitions, and the fixed-timestep game loop.
  *
  * js13kGames 2026 entry. Theme: Unicorns and Rainbows.
  * See LUCID_GAME_DESIGN_DOC.md for the full design; section numbers in the
  * comments throughout the source refer to it.
  */
-import { G, W, H, TITLE, PLAY } from './state.js';
-import { player, updatePlayer, spawnPlayer } from './player.js';
-import { spawnEnemies, updateEnemies, updateParts } from './entities.js';
+import { G, W, H, TS, TITLE, PLAY, DREAM } from './state.js';
+import { player, updatePlayer, placePlayer, hasShard } from './player.js';
+import { spawnRoom, updateEnemies, updateShots, updateProps, updateParts } from './entities.js';
+import { updateBoss } from './bosses.js';
 import { updateShift } from './shift.js';
-import { updateCamera } from './world.js';
+import { updateCamera, setRoom, room, ROOM_W } from './world.js';
+import { updateDialog } from './dialog.js';
 import { setCtx, drawFrame, drawTitle } from './render.js';
-import { initAudio, toggleMute } from './audio.js';
+import { initAudio, toggleMute, applyWorld, setTempo } from './audio.js';
+import { BESTIARY } from './data.js';
 
 // ─── canvas ──────────────────────────────────────────────────────────────────
 // Render at a low internal resolution and scale up with pixelated filtering:
@@ -42,13 +45,21 @@ const KEYS = {
   KeyM: 'm',
 };
 
+/** Enter a room and repopulate it. `edge` is the side Prisma walks in from. */
+export function enterRoom(index, edge) {
+  setRoom(index);
+  spawnRoom();
+  placePlayer(edge);
+  updateCamera(player, 1);
+  setTempo(!!G.boss);           // the boss room speeds the same music up
+}
+
 /** Audio may only start from a user gesture, and the title waits for one too. */
 function begin() {
   initAudio();
   if (G.mode === TITLE) {
     G.mode = PLAY;
-    spawnPlayer();
-    spawnEnemies();
+    enterRoom(0);
   }
 }
 
@@ -75,6 +86,15 @@ function frame(now) {
   G.mode === TITLE ? drawTitle() : drawFrame();
 }
 
+/** Saccharine's second phase summons Gloomlings; she borrows the spawner. */
+function spawnGloomling(x, y) {
+  const b = BESTIARY.G;
+  G.ents.push({
+    k: 'G', x, y, w: b.w, h: b.h, vx: 0, vy: 0, dir: 1,
+    dmg: 0, timer: 20, flash: 0, hurtCd: 0,
+  });
+}
+
 function step() {
   G.t++;
   if (G.mode === TITLE) return;
@@ -85,10 +105,37 @@ function step() {
   // registers on the frame the world resumes.
   if (G.hitstop > 0) { G.hitstop--; return; }
 
+  // Death: dissolve, then wake at the last Foalkeeper lantern, shards kept
+  // (§5.3 — no corpse run; too punishing for a jam, and too many bytes).
+  if (G.dead > 0) {
+    if (--G.dead === 0) {
+      G.seg = 7;
+      G.world = DREAM;
+      applyWorld(DREAM, 0.2);
+      enterRoom(G.checkpoint);
+      player.iframes = player.blink = 40;
+    }
+    updateParts();
+    return;
+  }
+
   updateShift();
+  updateDialog();
   updatePlayer();
   updateEnemies();
+  updateBoss(spawnGloomling);
+  updateShots();
+  updateProps();
   updateParts();
+
+  // --- room transitions ---
+  // The tile grid treats off-map columns as walls, which is what keeps enemies
+  // inside a room. So the transition is explicit: Prisma is pressed against a
+  // linked edge AND still holding that way, which also stops a knockback from
+  // shoving her into the next room by accident.
+  if (room.r !== undefined && player.x + player.w >= ROOM_W - 0.5 && G.key.r) enterRoom(room.r, 'l');
+  else if (room.l !== undefined && player.x <= 0.5 && G.key.l) enterRoom(room.l, 'r');
+
   updateCamera(player);
   if (G.shake > 0.3) G.shake *= 0.82; else G.shake = 0;
 
@@ -102,8 +149,7 @@ requestAnimationFrame(frame);
 // code the minifier removes from the shipped bundle.
 if (DEV) {
   window.L = {
-    G, player,
-    begin,
+    G, player, begin, enterRoom, hasShard,
     /** Advance the simulation n frames and draw, ignoring requestAnimationFrame. */
     frames(n = 1) {
       for (let i = 0; i < n; i++) { step(); }

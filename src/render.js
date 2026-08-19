@@ -9,10 +9,12 @@
  * draw function may read G.world directly — it takes the world as a parameter.
  */
 import { G, W, H, TS, DREAM, NIGHT, clamp, rnd } from './state.js';
-import { PAL, ROOM, ROYGBIV, HINTS } from './data.js';
-import { COLS, ROWS } from './world.js';
-import { player, ATK_REACH } from './player.js';
+import { PAL, ROYGBIV, BESTIARY, SHARD_NAME } from './data.js';
+import { COLS, ROWS, map, room } from './world.js';
+import { player, ATK_REACH, hasShard } from './player.js';
 import { form } from './entities.js';
+import { BOSS_HP } from './bosses.js';
+import { box as dialogBox, DIALOG } from './dialog.js';
 import { SHIFT_CD, RIPPLE } from './shift.js';
 import { isMuted } from './audio.js';
 
@@ -93,7 +95,10 @@ function drawScene(w) {
   ctx.translate(-(G.cam.x | 0) + shakeX, -(G.cam.y | 0) + shakeY);
   drawTiles(w);
   drawHints(w);
+  for (const p of G.props) drawProp(p, w);
   for (const e of G.ents) drawEnemy(e, w);
+  if (G.boss) drawBoss(G.boss, w);
+  for (const s of G.shots) drawShot(s, w);
   drawPrisma(w);
   drawParts();
   ctx.restore();
@@ -169,14 +174,14 @@ function drawTiles(w) {
   ctx.fillStyle = P.ground;
   for (let r = 0; r < ROWS; r++)
     for (let c = c0; c <= c1; c++)
-      if (ROOM[r][c] === '#') ctx.fillRect(c * TS, r * TS, TS, TS);
+      if (map[r][c] === '#') ctx.fillRect(c * TS, r * TS, TS, TS);
 
   // 2. world-conditional tiles. When a tile belongs to the OTHER world we draw
   //    a faint ghost of it — being able to see where the thorns will land is
   //    what makes shift-platforming readable instead of guesswork.
   for (let r = 0; r < ROWS; r++)
     for (let c = c0; c <= c1; c++) {
-      const t = ROOM[r][c], x = c * TS, y = r * TS;
+      const t = map[r][c], x = c * TS, y = r * TS;
       if (t === 'g') gummy(x, y, w === DREAM);
       else if (t === 't') thorn(x, y, w === NIGHT);
       else if (t === '^') spikes(x, y, w);
@@ -189,8 +194,8 @@ function drawTiles(w) {
   ctx.beginPath();
   for (let r = 0; r < ROWS; r++)
     for (let c = c0; c <= c1; c++) {
-      if (!solidCh(ROOM[r][c], w)) continue;
-      if (r > 0 && solidCh(ROOM[r - 1][c], w)) continue;
+      if (!solidCh(map[r][c], w)) continue;
+      if (r > 0 && solidCh(map[r - 1][c], w)) continue;
       const x = c * TS, y = r * TS + 1;
       ctx.moveTo(x, y + Math.sin(x * 0.35) * 1.2);
       ctx.quadraticCurveTo(x + 8, y - 2.5 + Math.sin(x * 0.2) * 1.2, x + TS, y + Math.sin((x + TS) * 0.35) * 1.2);
@@ -255,7 +260,7 @@ function drawHints(w) {
   ctx.fillStyle = PAL[w].ink;
   ctx.font = '6px monospace';
   ctx.textAlign = 'center';
-  for (const [c, r, text] of HINTS) {
+  for (const [c, r, text] of (room.h || [])) {
     ctx.globalAlpha = 0.55 + Math.sin(G.t * 0.05 + c) * 0.15;
     ctx.fillText(text, c * TS + 8, r * TS + Math.sin(G.t * 0.04 + c) * 1.6);
   }
@@ -268,28 +273,266 @@ function drawHints(w) {
 function drawEnemy(e, w) {
   const f = form(e);
   const cx = e.x + e.w / 2, cy = e.y + e.h / 2 + Math.sin(G.t * 0.14 + e.x) * 0.6;
-  const invuln = f.hp === 0;
+  const dormant = f.hp === 0;
+  const skin = e.flash ? '#fff' : dormant ? (w ? '#3a2f52' : '#cfc4dd') : w ? '#d04f7a' : '#ffd9ee';
 
-  ctx.fillStyle = e.flash ? '#fff' : w ? '#d04f7a' : '#ffd9ee';
-  ctx.globalAlpha = invuln ? 0.55 : 1;
+  ctx.fillStyle = skin;
   ctx.beginPath();
-  if (w) {
-    for (let i = 0; i < 12; i++) {                     // nightmare: spikeball
-      const a = i / 12 * 6.283, rad = i & 1 ? e.w / 2 + 3.5 : e.w / 2 - 1;
-      ctx.lineTo(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad);
+
+  if (e.k === 'G') {
+    if (w) {                                           // nightmare: spikeball
+      for (let i = 0; i < 12; i++) {
+        const a = i / 12 * 6.283, rad = i & 1 ? e.w / 2 + 3.5 : e.w / 2 - 1;
+        ctx.lineTo(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad);
+      }
+      ctx.closePath();
+    } else {                                           // dream: puffball
+      ctx.arc(cx, cy, e.w / 2, 0, 7);
+      ctx.arc(cx - 4, cy - 2.5, 3.2, 0, 7);
+      ctx.arc(cx + 4, cy - 2.5, 3.2, 0, 7);
+    }
+    ctx.fill();
+
+  } else if (e.k === 'W') {
+    // Cotton Wisp: a core with three motes orbiting it. In the nightmare the
+    // orbit tightens and sharpens into a wail.
+    ctx.arc(cx, cy, e.w / 2 - (w ? 1.5 : 0), 0, 7);
+    ctx.fill();
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const a = G.t * (w ? 0.11 : 0.05) + i * 2.09;
+      ctx.arc(cx + Math.cos(a) * (w ? 7 : 6), cy + Math.sin(a) * (w ? 7 : 6), w ? 1.6 : 2.6, 0, 7);
+    }
+    ctx.fill();
+
+  } else if (e.k === 'T') {
+    // Gumdrop Turret: a sugar dome with a spout, or dormant stone at night.
+    ctx.moveTo(e.x, e.y + e.h);
+    ctx.quadraticCurveTo(e.x - 1, e.y + 2, cx, e.y + (w ? 3 : 0));
+    ctx.quadraticCurveTo(e.x + e.w + 1, e.y + 2, e.x + e.w, e.y + e.h);
+    ctx.closePath();
+    ctx.fill();
+    if (!w) {                                          // sugar glint + spout
+      ctx.fillStyle = 'rgba(255,255,255,.6)';
+      ctx.beginPath();
+      ctx.ellipse(cx - 2, e.y + 5, 2.4, 1.4, -0.5, 0, 7);
+      ctx.fill();
+    }
+
+  } else {
+    // Carousel Pony: a wooden pony on a pole. In the dream she is painted and
+    // shielded head-on; in the nightmare the paint is gone and she charges.
+    ctx.fillStyle = e.flash ? '#fff' : w ? '#5a4a78' : '#c49bff';
+    ctx.fillRect(cx - 1, e.y - 7, 2, e.h + 7);         // the pole
+    ctx.fillStyle = skin;
+    ctx.beginPath();
+    ctx.roundRect(e.x, e.y + 4, e.w, 7, 3);            // body
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx + e.dir * 5, e.y + 3, 3.6, 0, 7);       // head
+    ctx.fill();
+    ctx.fillStyle = e.flash ? '#fff' : w ? '#3a2f52' : '#6a5a7a';
+    for (let i = 0; i < 4; i++)
+      ctx.fillRect(e.x + 1.5 + i * 3.4, e.y + 10, 2, 4 + Math.sin(G.t * 0.2 + i) * (w ? 1 : 0));
+    if (f.front) {                                     // the painted shield
+      ctx.fillStyle = e.flash ? '#fff' : '#ffd36e';
+      ctx.beginPath();
+      ctx.roundRect(cx + e.dir * 5 - 2, e.y + 1, 4, 6, 2);
+      ctx.fill();
+    }
+  }
+
+  if (!dormant) {
+    ctx.fillStyle = e.flash ? '#6a5a7a' : w ? '#4fd0c8' : '#6a5a7a';
+    const ex = e.k === 'C' ? cx + e.dir * 5 : cx;
+    const ey = e.k === 'C' ? e.y + 3 : cy;
+    ctx.fillRect(ex - 3.2, ey - 1, 1.6, 1.6);
+    ctx.fillRect(ex + 1.6, ey - 1, 1.6, 1.6);
+  }
+}
+
+/** Enemy fire: arcing gumdrops (pogo-able) and homing sparks. */
+function drawShot(s, w) {
+  if (s.k === 'drop') {
+    ctx.fillStyle = '#ff9e3d';
+    ctx.beginPath();
+    ctx.roundRect(s.x - 3, s.y - 3, 7, 7, 3);
+    ctx.fill();
+    ctx.fillStyle = 'rgba(255,255,255,.55)';
+    ctx.fillRect(s.x - 1.5, s.y - 2, 1.6, 1.6);
+  } else {
+    ctx.fillStyle = '#4fd0c8';
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = i / 8 * 6.283 + G.t * 0.2, rad = i & 1 ? 4.5 : 1.6;
+      ctx.lineTo(s.x + Math.cos(a) * rad, s.y + Math.sin(a) * rad);
     }
     ctx.closePath();
-  } else {                                             // dream: puffball
-    ctx.arc(cx, cy, e.w / 2, 0, 7);
-    ctx.arc(cx - 4, cy - 2.5, 3.2, 0, 7);
-    ctx.arc(cx + 4, cy - 2.5, 3.2, 0, 7);
+    ctx.fill();
   }
-  ctx.fill();
-  ctx.globalAlpha = 1;
+}
 
-  ctx.fillStyle = w ? '#4fd0c8' : '#6a5a7a';
-  ctx.fillRect(cx - 3.2, cy - 1, 1.6, 1.6);
-  ctx.fillRect(cx + 1.6, cy - 1, 1.6, 1.6);
+/** Shards, lanterns, NPCs and the rift — the things you touch rather than fight. */
+function drawProp(p, w) {
+  if (p.gone) return;
+  const cx = p.x + 8, cy = p.y + 8;
+  const bob = Math.sin(G.t * 0.05 + p.x) * 2;
+
+  if (p.k === 'R' || p.k === 'O') {
+    // A Rainbow Shard: a spinning wedge of the colour it restores.
+    const col = ROYGBIV[p.k === 'R' ? 0 : 1];
+    ctx.save();
+    ctx.translate(cx, cy + bob);
+    ctx.rotate(G.t * 0.04);
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(0, -7); ctx.lineTo(5, 0); ctx.lineTo(0, 7); ctx.lineTo(-5, 0);
+    ctx.fill();
+    ctx.globalAlpha = 0.3 + 0.2 * Math.sin(G.t * 0.1);
+    ctx.strokeStyle = col;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(0, 0, 11, 0, 7);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+    ctx.restore();
+
+  } else if (p.k === 'K') {
+    // The Foalkeeper's lantern in the dream; the Gravekeeper's, dim, at night.
+    ctx.strokeStyle = PAL[w].ink;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 10 + bob); ctx.lineTo(cx, cy - 6 + bob);
+    ctx.stroke();
+    ctx.fillStyle = w ? '#4a3f68' : '#ffd36e';
+    ctx.beginPath();
+    ctx.roundRect(cx - 4, cy - 6 + bob, 8, 10, 2);
+    ctx.fill();
+    ctx.globalAlpha = w ? 0.25 : 0.55 + 0.2 * Math.sin(G.t * 0.08);
+    ctx.fillStyle = w ? '#4fd0c8' : '#fff3c4';
+    ctx.beginPath();
+    ctx.arc(cx, cy - 1 + bob, 10, 0, 7);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+  } else if (p.k === 'N') {
+    // Nimbus the cloud sheep, and The Ram: same position, same silhouette,
+    // opposite truths (§2.2).
+    ctx.fillStyle = w ? '#3a2b55' : '#ffffff';
+    ctx.beginPath();
+    ctx.arc(cx - 4, cy + bob * 0.4, 5, 0, 7);
+    ctx.arc(cx + 1, cy - 2 + bob * 0.4, 6, 0, 7);
+    ctx.arc(cx + 5, cy + 1 + bob * 0.4, 4.5, 0, 7);
+    ctx.fill();
+    ctx.fillStyle = w ? '#241a33' : '#f0e2ee';
+    ctx.beginPath();
+    ctx.arc(cx + 7, cy + 3 + bob * 0.4, 3.4, 0, 7);     // face
+    ctx.fill();
+    if (w) {                                            // the ram's horn, curling back
+      ctx.strokeStyle = '#9a8fc0';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.arc(cx + 6, cy + 1 + bob * 0.4, 3.6, -0.6, 3.4);
+      ctx.stroke();
+    }
+    ctx.fillStyle = w ? '#d04f7a' : '#6a5a7a';          // hollow eyes at night
+    ctx.fillRect(cx + 6, cy + 2 + bob * 0.4, 1.6, 1.6);
+
+  } else if (p.k === '*') {
+    // The First Rift: a crack in the air, pulsing between both palettes.
+    const pulse = 0.6 + 0.4 * Math.sin(G.t * 0.12);
+    ctx.strokeStyle = w ? '#ffd9ee' : '#7a4fd0';
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = pulse;
+    ctx.beginPath();
+    for (let i = 0; i <= 6; i++)
+      ctx.lineTo(cx + Math.sin(i * 2.3 + G.t * 0.03) * 3, p.y - 4 + i * 4);
+    ctx.stroke();
+    ctx.globalAlpha = pulse * 0.35;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 9 + Math.sin(G.t * 0.09) * 2, 0, 7);
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+}
+
+/**
+ * SACCHARINE, the Smiling Mare (§7). Porcelain and painted in the dream;
+ * shift and the armour is gone, leaving the wooden carousel skeleton. Her
+ * smile is the health bar — it cracks before anything else does.
+ */
+function drawBoss(b, w) {
+  const cx = b.x + b.w / 2;
+  const rear = b.state === 2 ? -6 : 0;                  // reared up mid-stomp
+  const flash = b.flash > 0;
+
+  ctx.save();
+  ctx.translate(cx, b.y + b.h);
+  ctx.scale(b.dir, 1);
+
+  ctx.fillStyle = flash ? '#fff' : w ? '#4a3a28' : '#e8b7d0';
+  ctx.fillRect(-1.5, -b.h - 12, 3, b.h + 12);           // the carousel pole
+
+  // legs
+  ctx.fillStyle = flash ? '#fff' : w ? '#5a4632' : '#f6d9e8';
+  for (let i = 0; i < 4; i++) {
+    const swing = b.state === 0 ? Math.sin(G.t * 0.35 + i * 1.6) * 4 : 0;
+    ctx.fillRect(-12 + i * 8, -14, 4, 14 + swing * 0.2);
+  }
+
+  // barrel + neck + head
+  ctx.fillStyle = flash ? '#fff' : w ? '#6b543c' : '#ffffff';
+  ctx.beginPath();
+  ctx.roundRect(-15, -30 + rear, 30, 17, 8);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.roundRect(6, -40 + rear, 9, 14, 4);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.arc(13, -42 + rear, 7, 0, 7);
+  ctx.fill();
+
+  if (w) {
+    // The wooden skeleton showing through: ribs, and a broken horn.
+    ctx.strokeStyle = flash ? '#fff' : '#3a2b1e';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) { ctx.moveTo(-10 + i * 7, -28 + rear); ctx.lineTo(-10 + i * 7, -15 + rear); }
+    ctx.stroke();
+  } else {
+    // Porcelain sheen, and the painted saddle: this is the armour.
+    ctx.fillStyle = 'rgba(255,255,255,.75)';
+    ctx.beginPath();
+    ctx.ellipse(-4, -26 + rear, 7, 3, -0.3, 0, 7);
+    ctx.fill();
+    ctx.fillStyle = flash ? '#fff' : '#ff9ecb';
+    ctx.beginPath();
+    ctx.roundRect(-8, -31 + rear, 12, 5, 2);
+    ctx.fill();
+  }
+
+  ctx.fillStyle = flash ? '#fff' : w ? '#8a6a4a' : '#ffd36e';   // horn
+  ctx.beginPath();
+  ctx.moveTo(15, -46 + rear); ctx.lineTo(19, -45 + rear);
+  ctx.lineTo(w ? 20 : 25, w ? -52 + rear : -58 + rear);          // broken at night
+  ctx.fill();
+
+  // The painted smile, cracking as she takes damage.
+  ctx.strokeStyle = flash ? '#fff' : w ? '#d8a878' : '#d0537f';
+  ctx.lineWidth = 1.4;
+  ctx.beginPath();
+  const segs = 5;
+  for (let i = 0; i < segs; i++) {
+    if (b.crack > i / segs && (i & 1)) continue;        // pieces of it flake away
+    const a0 = 0.5 + i * 0.42, a1 = 0.5 + (i + 1) * 0.42;
+    ctx.moveTo(13 + Math.cos(a0) * 5.4, -42 + rear + Math.sin(a0) * 5.4);
+    ctx.lineTo(13 + Math.cos(a1) * 5.4, -42 + rear + Math.sin(a1) * 5.4);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = flash ? '#6a5a7a' : w ? '#d04f7a' : '#6a5a7a';
+  ctx.fillRect(14, -45 + rear, 2, 2);                   // eye
+  ctx.restore();
 }
 
 /**
@@ -425,17 +668,78 @@ function drawUI() {
       ctx.fillStyle = ROYGBIV[i];
       ctx.fillRect(-3.2, -3.2, 6.4, 6.4);
     } else {
-      ctx.strokeStyle = 'rgba(255,255,255,.28)';
+      ctx.strokeStyle = PAL[G.world].ink;
+      ctx.globalAlpha = 0.4;
       ctx.lineWidth = 1;
       ctx.strokeRect(-3, -3, 6, 6);
+      ctx.globalAlpha = 1;
     }
     ctx.restore();
   }
+
+  // Shards collected, bottom right (§8.6). Seven slots, because the whole plot
+  // is how much of the sky is still missing.
+  for (let i = 0; i < 7; i++) {
+    const x = W - 68 + i * 9, y = H - 9;
+    if (hasShard(i)) {
+      ctx.fillStyle = ROYGBIV[i];
+      ctx.beginPath();
+      ctx.moveTo(x, y - 4); ctx.lineTo(x + 3, y); ctx.lineTo(x, y + 4); ctx.lineTo(x - 3, y);
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = PAL[G.world].ink;
+      ctx.globalAlpha = 0.3;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x, y - 4); ctx.lineTo(x + 3, y); ctx.lineTo(x, y + 4); ctx.lineTo(x - 3, y);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  // Saccharine's health. Her cracking smile is the real read; this is the
+  // confirmation so the fight never feels ambiguous.
+  if (G.boss && G.boss.state !== 4) {
+    const frac = 1 - G.boss.dmg / BOSS_HP;
+    ctx.globalAlpha = 0.3;
+    ctx.fillStyle = PAL[G.world].ink;
+    ctx.fillRect(90, 8, 140, 5);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = G.world ? '#d04f7a' : '#e0568c';
+    ctx.fillRect(90, 8, 140 * frac, 5);
+    ctx.fillStyle = PAL[G.world].ink;
+    ctx.font = '6px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('SACCHARINE, THE SMILING MARE', 160, 21);
+    ctx.textAlign = 'left';
+  }
+
+  drawDialog();
+
   if (isMuted()) {
-    ctx.fillStyle = 'rgba(255,255,255,.5)';
+    ctx.globalAlpha = 0.55;
+    ctx.fillStyle = PAL[G.world].ink;
     ctx.font = '6px monospace';
     ctx.fillText('muted', W - 32, 12);
+    ctx.globalAlpha = 1;
   }
+}
+
+/** One line at a time, low on the screen, fading at both ends (§2.5). */
+function drawDialog() {
+  if (dialogBox.line < 0) return;
+  const text = DIALOG[dialogBox.line];
+  const fade = Math.min(1, dialogBox.t / 20);
+  ctx.globalAlpha = fade;
+  ctx.fillStyle = 'rgba(10,6,18,.66)';
+  ctx.fillRect(0, H - 30, W, 16);
+  ctx.fillStyle = '#fff';
+  ctx.font = '7px monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText(text, W / 2, H - 19);
+  ctx.textAlign = 'left';
+  ctx.globalAlpha = 1;
 }
 
 /** S01 — the title card: a sleeping foal under one slow rainbow band. */

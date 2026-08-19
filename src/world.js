@@ -1,25 +1,44 @@
 /**
- * The world: tile lookup, world-conditional collision, entity movement, camera.
+ * The world: room loading, tile lookup, world-conditional collision, entity
+ * movement, camera, and room-to-room transitions.
  *
  * Every question of the form "is this solid?" goes through solidAt(), which is
  * the ONLY place that knows a tile can exist in one world and not the other
- * (§11.3). Player, enemies and future bosses all share it, so adding a new
+ * (§11.3). Player, enemies and bosses all share it, so adding a new
  * world-conditional tile type is a one-line change.
  */
-import { ROOM } from './data.js';
+import { ROOMS } from './data.js';
 import { G, TS, W, H, DREAM, NIGHT, clamp } from './state.js';
 
-export const COLS = ROOM[0].length;
-export const ROWS = ROOM.length;
-export const ROOM_W = COLS * TS;
-export const ROOM_H = ROWS * TS;
+export let room = ROOMS[0];
+export let map = room.m;
+export let COLS = map[0].length;
+export let ROWS = map.length;
+export let ROOM_W = COLS * TS;
+export let ROOM_H = ROWS * TS;
 
-/** Tile character at a pixel position. Off-map sides are walls, below is open. */
+/** Swap in a room and recompute its dimensions. Callers repopulate entities. */
+export function setRoom(index) {
+  G.roomIndex = index;
+  room = ROOMS[index];
+  map = room.m;
+  COLS = map[0].length;
+  ROWS = map.length;
+  ROOM_W = COLS * TS;
+  ROOM_H = ROWS * TS;
+}
+
+/**
+ * Tile character at a pixel position. Off-map sides and the ceiling are walls;
+ * below the room is open, because falling out of the world is a real outcome.
+ * Sealing the ceiling matters: without it a wall-jump out of a tall shaft flings
+ * Prisma above the camera clamp and she vanishes off-screen for half a second.
+ */
 export function tileAt(px, py) {
   const c = px >> 4, r = py >> 4;
-  if (c < 0 || c >= COLS) return '#';
-  if (r < 0 || r >= ROWS) return ' ';
-  return ROOM[r][c];
+  if (c < 0 || c >= COLS || r < 0) return '#';
+  if (r >= ROWS) return ' ';
+  return map[r][c];
 }
 
 /** Is this pixel solid *in the given world*? The one world-conditional chokepoint. */
@@ -80,19 +99,23 @@ export function moveEntity(e, world) {
   }
 }
 
-/** True if any corner of the entity's box is on a hazard tile. */
+/** True if any sample point of the entity's box is on a hazard tile. */
 export function onHazard(e, world) {
   return hazardAt(e.x + 2, e.y + e.h - 1, world) ||
          hazardAt(e.x + e.w - 2, e.y + e.h - 1, world) ||
          hazardAt(e.x + e.w / 2, e.y + e.h / 2, world);
 }
 
+/** Is there a floor under this point? Used by walkers to turn at ledges. */
+export function groundAhead(e, dir, world) {
+  return solidAt(e.x + (dir > 0 ? e.w + 2 : -2), e.y + e.h + 2, world);
+}
+
 /** Camera: follow the target with a deadzone, clamped inside the room. */
-export function updateCamera(target) {
-  const wantX = target.x + target.w / 2 - W / 2;
-  const wantY = target.y + target.h / 2 - H / 2;
+export function updateCamera(target, snap) {
+  const wantX = clamp(target.x + target.w / 2 - W / 2, 0, Math.max(0, ROOM_W - W));
+  const wantY = clamp(target.y + target.h / 2 - H / 2, 0, Math.max(0, ROOM_H - H));
+  if (snap) { G.cam.x = wantX; G.cam.y = wantY; return; }
   G.cam.x += (wantX - G.cam.x) * 0.12;
   G.cam.y += (wantY - G.cam.y) * 0.1;
-  G.cam.x = clamp(G.cam.x, 0, ROOM_W - W);
-  G.cam.y = clamp(G.cam.y, 0, Math.max(0, ROOM_H - H));
 }

@@ -26,8 +26,21 @@ export const G = {
   ripX: 0, ripY: 0, // ripple origin, in world coordinates
 
   cam: { x: 0, y: 0 },
+
+  // --- world contents, repopulated on every room change ---
+  roomIndex: 0,
   ents: [],         // enemies
+  shots: [],        // projectiles
+  props: [],        // shards, lanterns, NPCs, the rift
   parts: [],        // particles
+  boss: null,
+
+  // --- progression ---
+  shards: 0,        // bitfield; bit n = shard n collected (§2.3)
+  checkpoint: 0,    // room index of the last Foalkeeper lantern
+  bossDead: 0,
+  forceShift: 0,    // set by the First Rift to shift you without the ability
+
   seg: 7,           // rainbow gauge segments remaining (§5.3)
   dead: 0,          // death-dissolve countdown
 

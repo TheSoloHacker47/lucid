@@ -6,7 +6,7 @@
  * world so the ripple can composite two of them in a single frame (§8.2).
  */
 import { G, DREAM, NIGHT } from './state.js';
-import { sfx } from './audio.js';
+import { sfx, applyWorld } from './audio.js';
 
 export const SHIFT_CD = 90;   // 1.5s at 60fps
 export const RIPPLE = 15;     // frames the ripple takes to sweep the screen
@@ -28,6 +28,7 @@ export function doShift(player) {
   if (player.iframes < SHIFT_IFRAMES) player.iframes = SHIFT_IFRAMES;
 
   sfx.shift();
+  applyWorld(G.world);   // crossfade the two music loops (§9.2)
   return 1;
 }
 

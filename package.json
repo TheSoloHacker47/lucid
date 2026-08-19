@@ -7,7 +7,7 @@
   "scripts": {
     "build": "node build.js",
     "dev": "node build.js --debug --verify",
-    "test": "node test.js",
+    "test": "node test.js && node build.js && node offline.js dist/index.html",
     "start": "node build.js && npx --yes serve dist"
   },
   "devDependencies": {
