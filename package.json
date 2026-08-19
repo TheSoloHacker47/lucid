@@ -1,0 +1,19 @@
+{
+  "name": "lucid",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LUCID - a 13KB dream/nightmare unicorn metroidvania for js13kGames 2026",
+  "type": "module",
+  "scripts": {
+    "build": "node build.js",
+    "dev": "node build.js --debug --verify",
+    "test": "node test.js",
+    "start": "node build.js && npx --yes serve dist"
+  },
+  "devDependencies": {
+    "advzip-bin": "^2.0.0",
+    "esbuild": "^0.25.0",
+    "roadroller": "^2.1.0",
+    "terser": "^5.36.0"
+  }
+}
